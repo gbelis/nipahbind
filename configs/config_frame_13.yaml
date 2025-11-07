@@ -1,0 +1,23 @@
+
+entities:
+
+  # 1. The Target: Nipah G Protein
+  - file:
+      id: nipah_g
+      path: 'targets/frame_13.pdb'
+
+      include:
+        - chain:
+            id: A
+
+
+      binding_types:
+        - chain:
+            id: A
+            # binding: 239, 240, 241, 242, 388, 389, 402, 490, 491, 492, 501, 506, 530, 532, 533, 555, 557, 559, 581
+
+
+  # 2. The Binder: To be designed
+  - protein:
+      id: binder
+      sequence: 40..70

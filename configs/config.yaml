@@ -1,0 +1,25 @@
+entities:
+
+  # 1. The Target: Nipah G Protein
+  - file:
+      id: nipah_g
+      path: '../bioemu_frames/frame_0.pdb'
+
+      include:
+        - chain:
+            id: A
+
+
+      binding_types:
+        - chain:
+            id: A
+            # 'binding': These residues MUST be part of the interface.
+            # Boltzgen will be forced to design a binder that
+            # makes contact with this surface.
+            # binding: 239, 240, 241, 242, 388, 389, 402, 490, 491, 492, 501, 506, 530, 532, 533, 555, 557, 559, 581
+
+
+  # 2. The Binder: To be designed
+  - protein:
+      id: binder
+      sequence: 40..70
