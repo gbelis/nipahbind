@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --time=1-00:00:00
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=100G
+#SBATCH --output=./logs/slurm-%x_%j.out # Standard output log file
+#SBATCH --account=bio-468
+
+
+
+import os
+import glob
+import yaml
+import subprocess
+import pandas as pd
+
+# -----------------------------
+# GLOBAL CONFIG
+# -----------------------------
+BASE = "/home/armstron/BIO468/workbench"
+INVARIANT_CHAIN_A = (
+    "ICLQKTSNQILKPKLISYTLPVVGQSGTCITDPLLAMDEGYFAYSHLERIGSCSRGVSKQRIIGVGEVLDRGDEVPSLFMTNVWTPPNPNTVYHCSAVYNNEFYYVLCAVSTVGDPILNSTYWSGSLMMTRLAVKPKSNGGGYNQHQLALRSIEKGRYDKVMPYGPSGIKQGDTLYFPAVGFLVRTEFKYNDSNCPITKCQYSKPENCRLSMGIRPNSHYILRSGLLKYNLSDGENPKVVFIEISDQRLSIGSPSKIYDSLGQPVFYQASFSWDTMIKFGDVLTVNPLVVNWRNNTVISRPGQSQCPRFNTCPEICWEGVYNDAFLIDRINWISAGVFLDSNQTAENPVFTVFKDNEILYRAQLASEDTNAQKTITNCFLLKNKIWCISLVEIYDTGDNVIRPKLFAVKIPEQCTH"
+)
+IPS_BASE = f"{BASE}/ipsae_check"
+os.makedirs(IPS_BASE, exist_ok=True)
+
+L1 = 10
+L2 = 10
+
+# -----------------------------
+# HELPERS
+# -----------------------------
+def run(cmd):
+    print(" ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def make_yaml(seq, out_path):
+    data = {
+        "version": 1,
+        "sequences": [
+            {"protein": {"id": "A", "sequence": INVARIANT_CHAIN_A}},
+            {"protein": {"id": "B", "sequence": seq}}
+        ],
+    }
+    with open(out_path, "w") as f:
+        yaml.dump(data, f, sort_keys=False)
+
+
+def find_file(pattern):
+    hits = glob.glob(pattern, recursive=True)
+    return hits[0] if hits else None
+
+
+# -----------------------------
+# MAIN PIPELINE
+# -----------------------------
+frame_dirs = glob.glob(f"{BASE}/frame_*_run")
+print(f"Found {len(frame_dirs)} frame directories.")
+all_results = []
+
+for frame_dir in frame_dirs:
+    frame_name = os.path.basename(frame_dir)
+    print(f"\n=== Processing {frame_name} ===")
+
+    csv_path = f"{frame_dir}/final_ranked_designs/final_designs_metrics_20.csv"
+    if not os.path.exists(csv_path):
+        print(f"[WARNING] Missing CSV for {frame_name}")
+        continue
+
+    df = pd.read_csv(csv_path)
+    if "designed_sequence" not in df.columns:
+        raise ValueError(f"CSV {csv_path} missing 'designed_sequence' column.")
+
+    # --- Create directories ---
+    frame_tag = os.path.basename(frame_dir)
+
+    yaml_dir = f"{IPS_BASE}/{frame_tag}/boltz_yaml"
+    boltz_out = f"{IPS_BASE}/{frame_tag}/boltz_outputs"
+
+    os.makedirs(yaml_dir, exist_ok=True)
+    os.makedirs(boltz_out, exist_ok=True)
+
+    # --- Generate YAMLs ---
+    yaml_files = []
+    for i, row in df.iterrows():
+        seq = row["designed_sequence"]
+        yaml_path = f"{yaml_dir}/design_{i}.yaml"
+        make_yaml(seq, yaml_path)
+        yaml_files.append((i, yaml_path))
+
+    # --- Boltz-2 + ipSAE ---
+    frame_scores = []
+
+    for design_id, yaml_file in yaml_files:
+        design_name = f"design_{design_id}"
+        out_dir = f"{boltz_out}/{design_name}"
+
+        # Run Boltz
+        run([
+            "boltz", "predict",
+            yaml_file,
+            "--out_dir", out_dir,
+            "--write_full_pae",
+            "--use_msa_server",
+            "--override"
+        ])
+
+        # Locate Boltz outputs
+        cif = find_file(f"{out_dir}/**/{design_name}_model_0.cif")
+        pae = find_file(f"{out_dir}/**/pae_{design_name}_model_0.npz")
+
+        if cif is None or pae is None:
+            print(f"[WARNING] Missing CIF/PAE for {design_name}")
+            continue
+
+        # Run ipSAE
+        ipsae_out = f"{out_dir}/{design_name}_ipsae.txt"
+        run(["ipsae", cif, pae, str(L1), str(L2)])
+
+        # Read ipSAE result
+        try:
+            df_ips = pd.read_csv(ipsae_out, delim_whitespace=True)
+            df_ips["design"] = design_name
+            df_ips["frame"] = frame_name
+            frame_scores.append(df_ips)
+        except Exception as e:
+            print(f"[WARNING] Failed to read ipSAE for {design_name}: {e}")
+
+    # Combine and rank within frame
+    if frame_scores:
+        frame_df = pd.concat(frame_scores, ignore_index=True)
+        ranked = (
+            frame_df.groupby("design", as_index=False)["ipSAE"].max()
+            .sort_values("ipSAE", ascending=False)
+        )
+        ranked.to_csv(f"{frame_dir}/ipsae_ranked_20.csv", index=False)
+        print(f"Saved ranking for {frame_name} → ipsae_ranked_20.csv")
+
+        all_results.append(ranked.assign(frame=frame_name))
+
+# Optional: global ranking across all frames
+if all_results:
+    mega = pd.concat(all_results, ignore_index=True)
+    mega.to_csv(f"{BASE}/all_frames_ipsae_ranked.csv", index=False)
+    print("\n=== Global ranking saved to all_frames_ipsae_ranked.csv ===")
+
+
